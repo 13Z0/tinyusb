@@ -38,7 +38,7 @@ def boards_from_config(config: str) -> list:
         with open(config) as f:
             cfg = json.load(f)
             return [b['name'] for b in cfg['boards'] + cfg.get('boards-skip', [])]
-    except (OSError, ValueError, KeyError) as e:
+    except (OSError, ValueError, KeyError, TypeError) as e:
         print(f'ERROR: cannot read board roster {config}: {e}', file=sys.stderr)
         sys.exit(1)
 
