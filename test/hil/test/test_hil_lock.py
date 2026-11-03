@@ -4,7 +4,7 @@
 # pins (agentrc's tests/test_hil_lock.py covers the primitive itself), hil_test refuses a board
 # whose lock is unavailable before flashing, a recovery blocker refuses the board as a blocker
 # rather than contention (RecoveryBlockerIsNotContention), an openocd_esp session left running passes the
-# board's lock to a cleanup holder (RetainedLock), `hold --all` takes the roster, and a missing
+# board's lock to a cleanup holder (RetainedLock), `hold --all` takes this host's roster, and a missing
 # lib/agentrc refuses at import (test_hil_agentrc.py covers the loader). Every lock lives in a
 # temp dir under a name no rig uses. Run directly:
 #   python3 test/hil/test/test_hil_lock.py
@@ -169,7 +169,7 @@ class PinnedDependency(unittest.TestCase):
         self.addCleanup(td.cleanup)
         self.root = td.name
         for rel in ('test/hil/helper/__init__.py', 'test/hil/helper/agentrc.py', 'test/hil/helper/hil_lock.py',
-                    'tools/get_deps.py'):
+                    'test/hil/helper/hil_util.py', 'tools/get_deps.py'):
             os.makedirs(os.path.join(self.root, os.path.dirname(rel)), exist_ok=True)
             shutil.copy(os.path.join(REPO, rel), os.path.join(self.root, rel))
         self.pin = agentrc.PIN
@@ -189,11 +189,18 @@ class PinnedDependency(unittest.TestCase):
         with open(os.path.join(self.root, 'lib/agentrc/.git/HEAD'), 'w') as f:
             f.write(head + '\n')
 
-    def cli(self, *argv):
-        # -P: the script must find helper/agentrc.py without the script-dir sys.path entry
-        r = subprocess.run([sys.executable, '-P', 'test/hil/helper/hil_lock.py', *argv], cwd=self.root,
-                           capture_output=True, text=True, timeout=30)
+    def cli(self, *argv, host='ci'):
+        # -P: the script must find helper/agentrc.py without the script-dir sys.path entry; the
+        # script runs as __main__ on a machine whose hostname is `host`
+        run = ('import runpy, socket, sys; host = sys.argv.pop(2); socket.gethostname = lambda: host; '
+               "sys.argv.pop(0); runpy.run_path(sys.argv[0], run_name='__main__')")
+        r = subprocess.run([sys.executable, '-P', '-c', run, 'test/hil/helper/hil_lock.py', host, *argv],
+                           cwd=self.root, capture_output=True, text=True, timeout=30)
         return r.returncode, r.stdout + r.stderr
+
+    def roster(self, rel, *names):
+        with open(os.path.join(self.root, rel), 'w') as f:
+            json.dump({'boards': [{'name': n} for n in names]}, f)
 
     def test_hold_all_takes_the_roster_with_boards_skip(self):
         lock_dir = os.path.join(self.root, 'locks')
@@ -212,6 +219,35 @@ class PinnedDependency(unittest.TestCase):
         self.assertEqual(sorted(line.split(':')[0] for line in out.splitlines()), sorted(names))
         rc, _ = self.cli('release', '--all')
         self.assertEqual(rc, 0)
+        self.assertEqual(self.cli('status'), (0, 'no locks\n'))
+
+    def test_hold_all_takes_this_hosts_roster(self):
+        self.provide(self.pin, os.path.join(self.root, 'locks'))
+        self.roster('test/hil/tinyusb.json', 'hil-lock-selftest-ci')
+        self.roster('test/hil/hfp.json', 'hil-lock-selftest-tusb')
+        self.addCleanup(self.cli, 'release', '--all')
+        self.assertEqual(self.cli('hold', '--all', '--reason', 'selftest', host='tusb'),
+                         (0, 'held: hil-lock-selftest-tusb\n'))
+
+    def test_hold_all_on_an_unknown_host_needs_a_named_roster(self):
+        self.provide(self.pin, os.path.join(self.root, 'locks'))
+        self.roster('test/hil/tinyusb.json', 'hil-lock-selftest-ci')
+        self.roster('local.json', 'hil-lock-selftest-local')
+        self.addCleanup(self.cli, 'release', '--all')
+        rc, out = self.cli('hold', '--all', '--reason', 'selftest', host='htpc')
+        self.assertEqual(rc, 2)
+        self.assertIn('host htpc has no roster here', out)
+        self.assertEqual(self.cli('status'), (0, 'no locks\n'))
+        self.assertEqual(self.cli('hold', '--all', '--config', 'local.json', '--reason', 'selftest', host='htpc'),
+                         (0, 'held: hil-lock-selftest-local\n'))
+
+    def test_hold_all_refuses_a_missing_roster(self):
+        self.provide(self.pin, os.path.join(self.root, 'locks'))
+        for host, argv in (('tusb', ()), ('ci', ('--config', 'missing.json'))):   # no hfp.json in this tree
+            with self.subTest(host=host):
+                rc, out = self.cli('hold', '--all', *argv, '--reason', 'selftest', host=host)
+                self.assertEqual(rc, 1)
+                self.assertIn('ERROR: cannot read board roster', out)
         self.assertEqual(self.cli('status'), (0, 'no locks\n'))
 
     def test_a_provider_without_hil_process_beside_it_is_refused(self):
