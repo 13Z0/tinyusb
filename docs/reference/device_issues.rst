@@ -170,8 +170,11 @@ other STALL on the hub can still trigger it.
 Workarounds:
 
 - Connect the RP2040 to a root port, or to a hub that is not affected.
-- Detect the lockup (``SOF_RD`` stops advancing while connected and not suspended) and restart the stack with
-  ``tud_deinit()`` and, after a short delay, ``tud_init()``, as Raspberry Pi's debugprobe firmware does.
+- Detect the lockup and restart the stack. Count it as a lockup only when ``SOF_RD`` stays unchanged for a few
+  hundred milliseconds while ``tud_connected()`` is true and ``tud_suspended()`` false: a bus reset also stops
+  SOFs. Restart from the task running ``tud_task()`` (``tud_task_stop()`` makes it return true): ``tud_deinit()``,
+  at least 2 ms with the pull-up off so the hub sees the disconnect, then ``tusb_init()``. Raspberry Pi's
+  debugprobe firmware restarts from a watchdog task instead, which TinyUSB does not support under an RTOS.
   ``tud_disconnect()`` and ``tud_connect()`` only switch the D+ pull-up and do not reset the controller.
 
 Espressif ESP32-S2/S3/P4
